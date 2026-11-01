@@ -133,6 +133,7 @@ struct Core {
     model: RefCell<Model>,
     pending: Rc<Cell<Option<Action>>>,
     buttons: RefCell<BTreeMap<Action, ButtonInteractionState>>,
+    toolbar: ActionToolbarState<Action>,
     worker: RefCell<Option<Receiver<Result<Snapshot, Error>>>>,
     focused: Cell<bool>,
     exposure_generation: Cell<u64>,
@@ -155,11 +156,6 @@ pub struct KeychainView {
 }
 fn r(x: f32, y: f32, w: f32, h: f32) -> Rect {
     Rect::new(x, y, w.max(0.0), h.max(0.0))
-}
-fn fill(b: Rect, color: Color, c: &mut PaintContext<'_>) {
-    Rectangle::new()
-        .color(RectangleColor::Custom(color))
-        .paint(b, c);
 }
 impl Core {
     fn button(&self, label: &str, a: Action) -> Button {
@@ -272,7 +268,7 @@ impl Core {
         let item = m
             .selected
             .and_then(|id| m.items.iter().find(|i| i.id == id));
-        let mut picker = Picker::new("アプリに許可…");
+        let mut picker = Picker::new("Allow Application…");
         if let Some(item) = item {
             for (n, a) in m.apps.iter().enumerate() {
                 if *a == item.owner || item.grants.contains(a) {
@@ -467,32 +463,145 @@ impl KeychainView {
             }),
             pending: pending.clone(),
             buttons: RefCell::new(BTreeMap::new()),
+            toolbar: ActionToolbarState::new(),
             worker: RefCell::new(None),
             focused: Cell::new(true),
             exposure_generation: Cell::new(0),
             worker_generation: Cell::new(0),
-            query: Field::new("ラベル・サービス・アカウントを検索", false, pending.clone()),
-            password: Field::new("保管庫のパスワード", true, pending.clone()),
-            confirm: Field::new("もう一度入力", true, pending.clone()),
-            service: Field::new("サービス名", false, pending.clone()),
-            account: Field::new("アカウント名", false, pending.clone()),
-            label: Field::new("表示名", false, pending.clone()),
-            value: Field::new("秘密情報", true, pending.clone()),
+            query: Field::new("Search items", false, pending.clone()),
+            password: Field::new("Vault password", true, pending.clone()),
+            confirm: Field::new("Enter again", true, pending.clone()),
+            service: Field::new("Service name", false, pending.clone()),
+            account: Field::new("Account name", false, pending.clone()),
+            label: Field::new("Label", false, pending.clone()),
+            value: Field::new("Secret", true, pending.clone()),
             scroll: ScrollState::new(),
             detail_scroll: ScrollState::new(),
-            grant_picker: RefCell::new(Picker::new("アプリに許可…")),
+            grant_picker: RefCell::new(Picker::new("Allow Application…")),
             form_scroll: ScrollState::new(),
         });
         core.start(Job::Refresh);
         Self { core }
     }
-    fn sidebar(b: Rect) -> Rect {
-        r(
-            b.origin.x,
-            b.origin.y + 54.0,
-            (b.size.width * 0.38).clamp(220.0, 340.0).min(b.size.width),
-            b.size.height - 54.0,
-        )
+    fn toolbar(&self) -> ActionToolbar<Action> {
+        let busy = self.core.worker.borrow().is_some();
+        let login_managed = self
+            .core
+            .model
+            .borrow()
+            .status
+            .is_some_and(|status| status.login_managed);
+        let mut toolbar = ActionToolbar::new(self.core.toolbar.clone())
+            .title("Keychain")
+            .trailing(
+                Action::New,
+                self.core
+                    .button("Add Item", Action::New)
+                    .leading_symbol(SymbolName::Plus)
+                    .enabled(!busy),
+            )
+            .trailing(
+                Action::Refresh,
+                self.core
+                    .button("Refresh", Action::Refresh)
+                    .leading_symbol(SymbolName::Refresh)
+                    .enabled(!busy),
+            );
+        if !login_managed {
+            toolbar = toolbar
+                .trailing(
+                    Action::Lock,
+                    self.core.button("Lock", Action::Lock).enabled(!busy),
+                )
+                .trailing(
+                    Action::ChangePassword,
+                    self.core
+                        .button("Change Password", Action::ChangePassword)
+                        .enabled(!busy),
+                );
+        }
+        toolbar
+    }
+    fn content(&self) -> Box<dyn View> {
+        let m = self.core.model.borrow();
+        let mut layout = VStack::new()
+            .alignment(StackAlignment::Stretch)
+            .gap(StackGap::None);
+        if m.status.is_none() {
+            layout = layout.child(
+                ContentArea::pane(
+                    VStack::new()
+                        .alignment(StackAlignment::Stretch)
+                        .gap(StackGap::Medium)
+                        .child(Text::styled("Keychain", TextRole::TitleSmall))
+                        .child(Text::body(if self.core.worker.borrow().is_some() {
+                            "Checking your vault…"
+                        } else {
+                            "Unable to connect to the keychain service."
+                        }))
+                        .child(
+                            self.core
+                                .button("Retry", Action::Refresh)
+                                .enabled(self.core.worker.borrow().is_none())
+                                .layout()
+                                .flex_grow(0.0),
+                        ),
+                )
+                .layout()
+                .flex_grow(1.0),
+            );
+        } else if m.form != Form::Main {
+            layout = layout.child(
+                Scroll::new(self.core.form_scroll.clone())
+                    .content(FormContents(self.core.clone()))
+                    .layout()
+                    .flex_grow(1.0)
+                    .flex_shrink(1.0),
+            );
+        } else {
+            let sidebar = VStack::new()
+                .alignment(StackAlignment::Stretch)
+                .gap(StackGap::Small)
+                .child(
+                    Padding::all(Theme::current().spacing.medium)
+                        .content(SearchField(self.core.clone())),
+                )
+                .child(
+                    Scroll::new(self.core.scroll.clone())
+                        .content(ItemList(self.core.clone()))
+                        .layout()
+                        .flex_grow(1.0)
+                        .flex_shrink(1.0),
+                );
+            layout = layout.child(Toolbar::new(self.toolbar())).child(
+                NavigationSplitView::new(
+                    sidebar,
+                    Scroll::new(self.core.detail_scroll.clone())
+                        .content(Details(self.core.clone())),
+                )
+                .flexible_sidebar(160.0, 280.0, 340.0)
+                .minimum_detail_width(320.0)
+                .sidebar_insets(appcore::viewkit::edge_insets::EdgeInsets::ZERO)
+                .shows_divider(false)
+                .layout()
+                .flex_grow(1.0)
+                .flex_shrink(1.0),
+            );
+        }
+        if let Some(error) = m.error {
+            layout = layout.child(
+                Padding::symmetric(
+                    Theme::current().spacing.large,
+                    Theme::current().spacing.small,
+                )
+                .content(
+                    Text::caption(error_text(error)).color(Theme::current().colors.destructive),
+                )
+                .layout()
+                .flex_shrink(0.0),
+            );
+        }
+        Box::new(Surface::app().content(layout))
     }
     fn form_frames(&self, b: Rect) -> (Rect, Vec<(&Field, &'static str, Rect)>, Rect, Rect) {
         let form = self.core.model.borrow().form;
@@ -507,22 +616,22 @@ impl KeychainView {
         };
         let specs: Vec<(&Field, &str)> = match form {
             Form::New => vec![
-                (&self.core.label, "表示名"),
-                (&self.core.service, "サービス"),
-                (&self.core.account, "アカウント"),
-                (&self.core.value, "秘密情報"),
+                (&self.core.label, "Label"),
+                (&self.core.service, "Service"),
+                (&self.core.account, "Account"),
+                (&self.core.value, "Secret"),
             ],
             Form::Initialize => vec![
-                (&self.core.password, "パスワード（12文字以上）"),
-                (&self.core.confirm, "確認"),
+                (&self.core.password, "Password (at least 12 characters)"),
+                (&self.core.confirm, "Confirm password"),
             ],
             Form::ChangePassword => vec![
-                (&self.core.password, "現在のパスワード"),
-                (&self.core.value, "新しいパスワード（12文字以上）"),
-                (&self.core.confirm, "確認"),
+                (&self.core.password, "Current password"),
+                (&self.core.value, "New password (at least 12 characters)"),
+                (&self.core.confirm, "Confirm password"),
             ],
             Form::AwaitingLogin => vec![],
-            Form::Unlock => vec![(&self.core.password, "以前の保管庫のパスワード")],
+            Form::Unlock => vec![(&self.core.password, "Previous vault password")],
             _ if self
                 .core
                 .model
@@ -532,7 +641,7 @@ impl KeychainView {
             {
                 vec![]
             }
-            _ => vec![(&self.core.password, "保管庫のパスワード")],
+            _ => vec![(&self.core.password, "Vault password")],
         };
         for (i, (f, label)) in specs.into_iter().enumerate() {
             fields.push((f, label, r(x, y + intro + i as f32 * 66.0, w, 30.0)));
@@ -552,49 +661,49 @@ impl KeychainView {
         let m = self.core.model.borrow();
         let (title, description, submit) = match m.form {
             Form::AwaitingLogin => (
-                "ログイン認証を確認できません",
-                "画面をロックしてOSのパスワードで認証し直してください。既存のデータは変更していません。",
-                "再読み込み",
+                "Sign-In Required",
+                "Lock the screen and sign in again with your OS password. Your existing data has not been changed.",
+                "Refresh",
             ),
             Form::Initialize => (
-                "保管庫を作成",
-                "この端末だけに暗号化して保存します。パスワードを忘れると復元できません。ログインとは別のパスワードです。",
-                "作成",
+                "Create Vault",
+                "Encrypted on this device. This password is separate from sign-in. If you forget it, the vault cannot be recovered.",
+                "Create",
             ),
             Form::Unlock => (
-                "保管庫をログイン認証に連動",
-                "移行・復旧のため、以前の保管庫のパスワードを一度だけ入力してください。以後はOSへのログインで自動的に解錠します。",
-                "移行",
+                "Connect Vault to Sign-In",
+                "Enter your previous vault password once to migrate or recover it. Afterward, OS sign-in unlocks the vault automatically.",
+                "Migrate",
             ),
             Form::New => (
-                "項目を追加",
-                "この項目の所有者はKeychainです。ほかのアプリには明示的に許可できます。",
-                "保存",
+                "Add Item",
+                "Keychain owns this item. You can explicitly grant access to other applications.",
+                "Save",
             ),
             Form::Reveal => (
-                "秘密情報を表示",
-                "10秒後、またはウィンドウがフォーカスを失うと自動で隠れます。",
-                "表示",
+                "Reveal Secret",
+                "The secret is hidden automatically after 10 seconds or when this window loses focus.",
+                "Reveal",
             ),
             Form::Delete => (
-                "項目を削除",
-                "この項目を保管庫から削除します。元には戻せません。",
-                "削除",
+                "Delete Item",
+                "This item will be permanently removed from the vault. This cannot be undone.",
+                "Delete",
             ),
             Form::Grant(_) => (
-                "アプリへの利用を許可",
-                "選択した署名のアプリに、この項目の取得を許可します。",
-                "許可",
+                "Allow Application Access",
+                "Allow the application with the selected signing identity to retrieve this item.",
+                "Allow",
             ),
             Form::Revoke(_) => (
-                "アプリの許可を取り消す",
-                "取り消し後の取得を拒否します。すでにアプリへ渡した値は回収できません。",
-                "取り消す",
+                "Revoke Application Access",
+                "Deny future access. Values already received by the app cannot be recalled.",
+                "Revoke",
             ),
             Form::ChangePassword => (
-                "パスワードを変更",
-                "保管庫を新しいパスワードで暗号化し直します。",
-                "変更",
+                "Change Password",
+                "The vault will be encrypted again with your new password.",
+                "Change",
             ),
             Form::Main => return,
         };
@@ -608,7 +717,7 @@ impl KeychainView {
         };
         let description = if let Some(a) = target {
             format!(
-                "{}\n許可先：{}\n署名：{}",
+                "{}\nApplication: {}\nSigning identity: {}",
                 description,
                 a.package,
                 a.signer
@@ -649,7 +758,7 @@ impl KeychainView {
         }
         let busy = self.core.worker.borrow().is_some();
         self.core
-            .button(if busy { "処理中…" } else { submit }, Action::Submit)
+            .button(if busy { "Working…" } else { submit }, Action::Submit)
             .style(if m.form == Form::Delete {
                 ButtonStyle::Danger
             } else {
@@ -659,7 +768,7 @@ impl KeychainView {
             .paint(submit_frame, c);
         if !matches!(m.form, Form::Initialize | Form::Unlock) {
             self.core
-                .button("キャンセル", Action::Cancel)
+                .button("Cancel", Action::Cancel)
                 .style(ButtonStyle::Ghost)
                 .enabled(!busy)
                 .paint(cancel, c);
@@ -686,104 +795,9 @@ impl View for KeychainView {
         if self.core.worker.borrow().is_some() {
             c.request_redraw_at(now + Duration::from_millis(32));
         }
-        fill(b, c.theme.colors.background, c);
-        let m = self.core.model.borrow();
-        let form = m.form;
-        let status = m.status;
-        let error = m.error;
-        drop(m);
-        if status.is_none() {
-            Text::styled("Keychain", TextRole::TitleLarge).paint(
-                r(
-                    b.origin.x + 32.0,
-                    b.origin.y + 40.0,
-                    b.size.width - 64.0,
-                    40.0,
-                ),
-                c,
-            );
-            Text::body(if self.core.worker.borrow().is_some() {
-                "保管庫を確認しています…"
-            } else {
-                "キーチェーンサービスに接続できません。"
-            })
-            .color(c.theme.colors.text_secondary)
-            .paint(
-                r(
-                    b.origin.x + 32.0,
-                    b.origin.y + 96.0,
-                    b.size.width - 64.0,
-                    60.0,
-                ),
-                c,
-            );
-            self.core
-                .button("再試行", Action::Refresh)
-                .enabled(self.core.worker.borrow().is_none())
-                .paint(r(b.origin.x + 32.0, b.origin.y + 174.0, 100.0, 30.0), c);
-        } else if form != Form::Main {
-            Scroll::new(self.core.form_scroll.clone())
-                .content(FormContents(self.core.clone()))
-                .paint(
-                    r(b.origin.x, b.origin.y, b.size.width, b.size.height - 36.0),
-                    c,
-                );
-        } else {
-            let side = Self::sidebar(b);
-            self.core.query.view.paint(
-                r(
-                    b.origin.x + 12.0,
-                    b.origin.y + 12.0,
-                    (side.size.width - 24.0).max(0.0),
-                    30.0,
-                ),
-                c,
-            );
-            for (label, a, x, w) in
-                toolbar_buttons(b, side, status.is_some_and(|s| s.login_managed))
-            {
-                self.core
-                    .button(label, a)
-                    .enabled(self.core.worker.borrow().is_none())
-                    .paint(r(b.origin.x + x, b.origin.y + 12.0, w, 30.0), c);
-            }
-            Scroll::new(self.core.scroll.clone())
-                .content(ItemList(self.core.clone()))
-                .paint(side, c);
-            fill(
-                r(
-                    side.origin.x + side.size.width,
-                    side.origin.y,
-                    1.0,
-                    side.size.height,
-                ),
-                c.theme.colors.border,
-                c,
-            );
-            let detail = r(
-                side.origin.x + side.size.width + 1.0,
-                b.origin.y + 54.0,
-                b.size.width - side.size.width - 1.0,
-                b.size.height - 82.0,
-            );
-            Scroll::new(self.core.detail_scroll.clone())
-                .content(Details(self.core.clone()))
-                .paint(detail, c);
-        }
-        if let Some(e) = error {
-            Text::caption(error_text(e))
-                .color(c.theme.colors.destructive)
-                .paint(
-                    r(
-                        b.origin.x + 16.0,
-                        b.origin.y + b.size.height - 28.0,
-                        b.size.width - 32.0,
-                        24.0,
-                    ),
-                    c,
-                );
-        }
+        self.content().paint(b, c);
     }
+
     fn handle_event(&self, b: Rect, event: &ViewEvent, c: &mut EventContext<'_>) -> EventResult {
         if let ViewEvent::FocusChanged { focused } = event {
             self.core.focused.set(*focused);
@@ -811,66 +825,7 @@ impl View for KeychainView {
                 return EventResult::Consumed;
             }
         }
-        let m = self.core.model.borrow();
-        let form = m.form;
-        let status = m.status;
-        drop(m);
-        let mut result = EventResult::Ignored;
-        if status.is_none() {
-            result = result.merge(self.core.button("再試行", Action::Refresh).handle_event(
-                r(b.origin.x + 32.0, b.origin.y + 174.0, 100.0, 30.0),
-                event,
-                c,
-            ));
-        } else if form != Form::Main {
-            result = result.merge(
-                Scroll::new(self.core.form_scroll.clone())
-                    .content(FormContents(self.core.clone()))
-                    .handle_event(
-                        r(b.origin.x, b.origin.y, b.size.width, b.size.height - 36.0),
-                        event,
-                        c,
-                    ),
-            );
-        } else {
-            let side = Self::sidebar(b);
-            result = result.merge(self.core.query.view.handle_event(
-                r(
-                    b.origin.x + 12.0,
-                    b.origin.y + 12.0,
-                    side.size.width - 24.0,
-                    30.0,
-                ),
-                event,
-                c,
-            ));
-            for (label, a, x, w) in
-                toolbar_buttons(b, side, status.is_some_and(|s| s.login_managed))
-            {
-                result = result.merge(
-                    self.core
-                        .button(label, a)
-                        .enabled(self.core.worker.borrow().is_none())
-                        .handle_event(r(b.origin.x + x, b.origin.y + 12.0, w, 30.0), event, c),
-                );
-            }
-            result = result.merge(
-                Scroll::new(self.core.scroll.clone())
-                    .content(ItemList(self.core.clone()))
-                    .handle_event(side, event, c),
-            );
-            let detail = r(
-                side.origin.x + side.size.width + 1.0,
-                b.origin.y + 54.0,
-                b.size.width - side.size.width - 1.0,
-                b.size.height - 82.0,
-            );
-            result = result.merge(
-                Scroll::new(self.core.detail_scroll.clone())
-                    .content(Details(self.core.clone()))
-                    .handle_event(detail, event, c),
-            );
-        }
+        let mut result = self.content().handle_event(b, event, c);
         if let Some(a) = self.core.pending.take() {
             self.core.action(a);
             c.request_redraw_in(b);
@@ -909,14 +864,14 @@ impl View for FormContents {
         }
         result = result.merge(
             self.0
-                .button("実行", Action::Submit)
+                .button("Continue", Action::Submit)
                 .enabled(self.0.worker.borrow().is_none())
                 .handle_event(submit, event, c),
         );
         if !matches!(form, Form::Initialize | Form::Unlock) {
             result = result.merge(
                 self.0
-                    .button("キャンセル", Action::Cancel)
+                    .button("Cancel", Action::Cancel)
                     .handle_event(cancel, event, c),
             );
         }
@@ -925,7 +880,7 @@ impl View for FormContents {
 }
 struct Details(Rc<Core>);
 impl Details {
-    fn content(&self) -> Padding<VStack> {
+    fn content(&self) -> ContentArea<VStack> {
         let m = self.0.model.borrow();
         let mut stack = VStack::new()
             .alignment(StackAlignment::Stretch)
@@ -934,14 +889,15 @@ impl Details {
             .selected
             .and_then(|id| m.items.iter().find(|i| i.id == id))
         else {
-            return Padding::all(24.0)
-                .content(stack.child(Text::body("項目を追加すると、ここに詳細を表示します。")));
+            return ContentArea::pane(stack.child(Text::body(
+                "Select an item to view its details, or add a new item.",
+            )));
         };
         stack = stack.child(Text::styled(&item.label, TextRole::TitleSmall));
         for (label, value) in [
-            ("サービス", item.service.as_str()),
-            ("アカウント", item.account.as_str()),
-            ("所有者", item.owner.package.as_str()),
+            ("Service", item.service.as_str()),
+            ("Account", item.account.as_str()),
+            ("Owner", item.owner.package.as_str()),
         ] {
             stack = stack.child(
                 VStack::new()
@@ -953,7 +909,7 @@ impl Details {
         }
         stack = stack
             .child(Text::caption(format!(
-                "署名 {} · {}",
+                "Signing identity: {} · {}",
                 item.owner
                     .signer
                     .iter()
@@ -969,7 +925,7 @@ impl Details {
                             std::str::from_utf8(s.expose())
                                 .map(str::to_owned)
                                 .unwrap_or_else(|_| {
-                                    format!("バイナリの秘密情報（{}バイト）", s.expose().len())
+                                    format!("Binary secret ({} bytes)", s.expose().len())
                                 })
                         })
                         .unwrap_or_else(|| "••••••••••••".into()),
@@ -981,9 +937,9 @@ impl Details {
                     .gap(StackGap::Small)
                     .child(self.0.button(
                         if m.revealed.is_some() {
-                            "隠す"
+                            "Hide"
                         } else {
-                            "表示"
+                            "Reveal"
                         },
                         if m.revealed.is_some() {
                             Action::Hide
@@ -993,24 +949,24 @@ impl Details {
                     ))
                     .child(
                         self.0
-                            .button("削除", Action::Delete)
+                            .button("Delete", Action::Delete)
                             .style(ButtonStyle::Danger),
                     ),
             )
             .child(Divider::new())
-            .child(Text::caption("利用を許可したアプリ"));
+            .child(Text::caption("Allowed Applications"));
         for (n, a) in item.grants.iter().enumerate() {
             stack = stack.child(
                 self.0
                     .button(
-                        &format!("{} [{}] の許可を取り消す", a.package, signer(a)),
+                        &format!("Revoke access for {} [{}]", a.package, signer(a)),
                         Action::Revoke(n),
                     )
                     .style(ButtonStyle::Ghost),
             );
         }
         stack = stack.child(CachedPicker(self.0.clone()));
-        Padding::all(24.0).content(stack)
+        ContentArea::pane(stack)
     }
 }
 impl View for Details {
@@ -1037,128 +993,115 @@ impl View for CachedPicker {
     }
 }
 
-fn toolbar_buttons(
-    b: Rect,
-    side: Rect,
-    login_managed: bool,
-) -> Vec<(&'static str, Action, f32, f32)> {
-    if login_managed {
-        return vec![
-            ("追加", Action::New, side.size.width + 12.0, 64.0),
-            ("更新", Action::Refresh, b.size.width - 76.0, 64.0),
-        ];
-    }
-    let mut buttons = vec![
-        ("追加", Action::New, side.size.width + 12.0, 64.0),
-        ("施錠", Action::Lock, b.size.width - 148.0, 64.0),
-        ("変更", Action::ChangePassword, b.size.width - 72.0, 60.0),
-    ];
-    if b.size.width - side.size.width > 340.0 {
-        buttons.push(("更新", Action::Refresh, b.size.width - 224.0, 64.0));
-    }
-    buttons
-}
 fn signer(a: &Application) -> String {
     a.signer[..6].iter().map(|b| format!("{b:02x}")).collect()
 }
 fn origin(value: u8) -> &'static str {
     match value {
-        1 => "組み込みアプリ",
-        2 => "署名済みアプリ",
-        _ => "開発用アプリ",
+        1 => "Built-in application",
+        2 => "Signed application",
+        _ => "Development application",
     }
 }
 fn error_text(e: Error) -> &'static str {
     match e {
-        Error::Authentication => "パスワードが違うか、保管庫を認証できません。",
-        Error::Invalid => {
-            "入力内容を確認してください。新しいパスワードは12文字以上で、確認欄と一致させてください。"
+        Error::Authentication => {
+            "The password is incorrect or the vault could not be authenticated."
         }
-        Error::Locked => "保管庫は施錠されています。",
-        Error::Denied => "この操作は許可されていません。",
-        Error::Unavailable => "サービスに接続できません。",
-        Error::Storage => "保存に失敗しました。保管庫を解錠し直してください。",
-        _ => "処理を完了できません。更新して状態を確認してください。",
+        Error::Invalid => {
+            "Check your entries. A new password must contain at least 12 characters and match the confirmation."
+        }
+        Error::Locked => "The vault is locked.",
+        Error::Denied => "This operation is not permitted.",
+        Error::Unavailable => "Unable to connect to the service.",
+        Error::Storage => "The vault could not be saved. Unlock it again before continuing.",
+        _ => "The operation could not be completed. Refresh to check the current state.",
+    }
+}
+struct SearchField(Rc<Core>);
+impl View for SearchField {
+    fn measure(&self, c: Constraints, context: &mut MeasureContext<'_>) -> Size {
+        self.0.query.view.measure(c, context)
+    }
+    fn paint(&self, b: Rect, context: &mut PaintContext<'_>) {
+        self.0.query.view.paint(b, context);
+    }
+    fn handle_event(
+        &self,
+        b: Rect,
+        event: &ViewEvent,
+        context: &mut EventContext<'_>,
+    ) -> EventResult {
+        self.0.query.view.handle_event(b, event, context)
     }
 }
 struct ItemList(Rc<Core>);
-impl View for ItemList {
-    fn measure(&self, c: Constraints, _: &mut MeasureContext<'_>) -> Size {
-        c.constrain(Size::new(
-            c.maximum.width,
-            self.0.model.borrow().items.len() as f32 * 68.0,
-        ))
-    }
-    fn paint(&self, b: Rect, c: &mut PaintContext<'_>) {
+impl ItemList {
+    fn content(&self) -> VStack {
         let m = self.0.model.borrow();
-        let q = self.0.query.state.value().to_lowercase();
-        let mut visual = 0;
-        for (n, i) in m.items.iter().enumerate() {
-            if !format!("{} {} {}", i.label, i.service, i.account)
-                .to_lowercase()
-                .contains(&q)
-            {
-                continue;
-            }
-            let selected = m.selected == Some(i.id);
-            self.0
-                .button(&i.label, Action::Select(n))
-                .style(ButtonStyle::Custom {
-                    background: if selected {
-                        c.theme.list.selected_background
+        let query = self.0.query.state.value().to_lowercase();
+        let entries: Vec<_> = m
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                format!("{} {} {}", item.label, item.service, item.account)
+                    .to_lowercase()
+                    .contains(&query)
+            })
+            .collect();
+        let mut rows = VStack::new()
+            .alignment(StackAlignment::Stretch)
+            .gap(StackGap::ExtraSmall);
+        for (position, (index, item)) in entries.iter().enumerate() {
+            let action = Action::Select(*index);
+            let interaction = self
+                .0
+                .buttons
+                .borrow_mut()
+                .entry(action)
+                .or_default()
+                .clone();
+            let pending = self.0.pending.clone();
+            rows = rows.child(
+                ListRow::with_interaction(interaction, &item.label)
+                    .subtitle(&item.account)
+                    .selected(m.selected == Some(item.id))
+                    .adjacent_rows(position > 0, position + 1 < entries.len())
+                    .on_select(move || pending.set(Some(action)))
+                    .layout()
+                    .height(Theme::current().layout.list_row_height)
+                    .flex_shrink(0.0),
+            );
+        }
+        if entries.is_empty() {
+            rows = rows.child(
+                Padding::all(Theme::current().spacing.large).content(Text::caption(
+                    if query.is_empty() {
+                        "No items in this vault."
                     } else {
-                        c.theme.list.background
+                        "No matching items."
                     },
-                    hovered_background: c.theme.list.hovered_background,
-                    border: Color::TRANSPARENT,
-                    hovered_border: Color::TRANSPARENT,
-                    foreground: c.theme.list.foreground,
-                })
-                .radius(CornerRadius::None)
-                .content(
-                    VStack::new()
-                        .alignment(StackAlignment::Start)
-                        .gap(StackGap::Small)
-                        .child(Text::label(&i.label))
-                        .child(Text::caption(&i.account).color(c.theme.colors.text_secondary)),
-                )
-                .paint(
-                    r(
-                        b.origin.x,
-                        b.origin.y + visual as f32 * 68.0,
-                        b.size.width,
-                        68.0,
-                    ),
-                    c,
-                );
-            visual += 1;
+                )),
+            );
         }
+        rows
     }
-    fn handle_event(&self, b: Rect, event: &ViewEvent, c: &mut EventContext<'_>) -> EventResult {
-        let m = self.0.model.borrow();
-        let q = self.0.query.state.value().to_lowercase();
-        let mut visual = 0;
-        let mut result = EventResult::Ignored;
-        for (n, i) in m.items.iter().enumerate() {
-            if !format!("{} {} {}", i.label, i.service, i.account)
-                .to_lowercase()
-                .contains(&q)
-            {
-                continue;
-            }
-            result = result.merge(self.0.button(&i.label, Action::Select(n)).handle_event(
-                r(
-                    b.origin.x,
-                    b.origin.y + visual as f32 * 68.0,
-                    b.size.width,
-                    68.0,
-                ),
-                event,
-                c,
-            ));
-            visual += 1;
-        }
-        result
+}
+impl View for ItemList {
+    fn measure(&self, c: Constraints, context: &mut MeasureContext<'_>) -> Size {
+        self.content().measure(c, context)
+    }
+    fn paint(&self, b: Rect, context: &mut PaintContext<'_>) {
+        self.content().paint(b, context);
+    }
+    fn handle_event(
+        &self,
+        b: Rect,
+        event: &ViewEvent,
+        context: &mut EventContext<'_>,
+    ) -> EventResult {
+        self.content().handle_event(b, event, context)
     }
 }
 #[cfg(test)]
@@ -1234,7 +1177,7 @@ mod tests {
         let nodes = paint(&v);
         let node = nodes
             .iter()
-            .find(|n| n.label.as_deref() == Some("アプリに許可…"))
+            .find(|n| n.label.as_deref() == Some("Allow Application…"))
             .expect("grant picker");
         let point = Point::new(
             node.bounds.origin.x + node.bounds.size.width / 2.0,
@@ -1339,9 +1282,17 @@ mod tests {
         assert!(
             !nodes
                 .iter()
-                .any(|n| n.label.as_deref() == Some("保管庫のパスワード"))
+                .any(|n| n.label.as_deref() == Some("Vault password"))
         );
-        for (_, action, _, _) in toolbar_buttons(bounds(), KeychainView::sidebar(bounds()), true) {
+        let mut text = TextMeasurer::new();
+        for (action, _, _) in v.toolbar().into_visible_actions(
+            bounds(),
+            &mut MeasureContext {
+                theme: &Theme::LIGHT,
+                typography: &Theme::LIGHT.typography,
+                text_measurer: &mut text,
+            },
+        ) {
             assert!(!matches!(action, Action::Lock | Action::ChangePassword));
         }
         v.core.model.borrow_mut().form = Form::AwaitingLogin;
@@ -1351,15 +1302,121 @@ mod tests {
     }
     #[test]
     fn toolbar_controls_do_not_overlap_at_supported_widths() {
-        for width in [480.0, 640.0, 880.0, 1200.0] {
-            let b = r(0.0, 0.0, width, 620.0);
-            let side = KeychainView::sidebar(b);
-            let buttons = toolbar_buttons(b, side, false);
-            for (i, (_, _, x, w)) in buttons.iter().enumerate() {
-                assert!(*x >= side.size.width && x + w <= width);
-                for (_, _, other, ow) in buttons.iter().skip(i + 1) {
-                    assert!(x + w <= *other || other + ow <= *x);
+        let view = fixture();
+        let theme = Theme::LIGHT;
+        for width in [320.0, 480.0, 640.0, 880.0, 1200.0] {
+            let bounds = r(0.0, 0.0, width, theme.layout.top_bar_height);
+            let mut text = TextMeasurer::new();
+            let controls = view.toolbar().into_visible_actions(
+                bounds,
+                &mut MeasureContext {
+                    theme: &theme,
+                    typography: &theme.typography,
+                    text_measurer: &mut text,
+                },
+            );
+            for (index, (_, frame, _)) in controls.iter().enumerate() {
+                assert!(frame.origin.x >= 0.0 && frame.origin.x + frame.size.width <= width);
+                for (_, other, _) in controls.iter().skip(index + 1) {
+                    assert!(frame.intersection(*other).is_none());
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn filtered_native_row_selects_the_original_item_and_clears_exposed_content() {
+        let view = fixture();
+        let mut item = view.core.model.borrow().items[0].clone();
+        item.id = [2; 16];
+        item.label = "Other account".into();
+        item.account = "other@example.test".into();
+        view.core.model.borrow_mut().items.push(item);
+        view.core.query.state.set_value("other");
+        let nodes = paint(&view);
+        let rows: Vec<_> = nodes
+            .iter()
+            .filter(|node| node.role == AccessibilityRole::ListItem)
+            .collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label.as_deref(), Some("Other account"));
+        let frame = rows[0].bounds;
+        let position = Point::new(
+            frame.origin.x + frame.size.width * 0.5,
+            frame.origin.y + frame.size.height * 0.5,
+        );
+        view.core.model.borrow_mut().revealed = Some(Secret::new(b"test-only-value".to_vec()));
+        for e in [
+            ViewEvent::PointerPressed {
+                position,
+                button: PointerButton::Primary,
+            },
+            ViewEvent::PointerReleased {
+                position,
+                button: PointerButton::Primary,
+            },
+        ] {
+            event(&view, e);
+        }
+        let model = view.core.model.borrow();
+        assert_eq!(model.selected, Some([2; 16]));
+        assert!(model.revealed.is_none());
+        assert!(model.hide_at.is_none());
+        assert!(view.core.worker.borrow().is_none());
+    }
+
+    #[test]
+    fn standard_split_corners_expose_chrome_and_rows_follow_activation_state() {
+        use appcore::viewkit::draw_command::DrawCommand;
+        let view = fixture();
+        for mut theme in [Theme::LIGHT, Theme::DARK] {
+            theme.motion = theme.motion.reduced();
+            for active in [true, false] {
+                let mut list = DisplayList::new();
+                let mut nodes = Vec::new();
+                let mut text = TextMeasurer::new();
+                view.paint(
+                    bounds(),
+                    &mut PaintContext::new(&mut list, &theme, &theme.typography, &mut text)
+                        .with_window_active(active)
+                        .with_accessibility_nodes(&mut nodes),
+                );
+                assert!(nodes.iter().any(|n| n.role == AccessibilityRole::Toolbar));
+                let (index, pane, radii) = list
+                    .commands()
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, command)| match command {
+                        DrawCommand::PushRoundedCornersClip { rect, radii }
+                            if rect.origin.x > 0.0
+                                && rect.origin.y == theme.layout.top_bar_height =>
+                        {
+                            Some((index, *rect, *radii))
+                        }
+                        _ => None,
+                    })
+                    .expect("the toolbar/sidebar junction must use the standard pane clip");
+                assert_eq!(radii, [theme.radius.extra_large, 0.0, 0.0, 0.0]);
+                let backdrop =
+                    list.commands()[..index]
+                        .iter()
+                        .rev()
+                        .find_map(|command| match command {
+                            DrawCommand::FillRect { rect, color } if rect.contains(pane.origin) => {
+                                Some(*color)
+                            }
+                            _ => None,
+                        });
+                assert_eq!(backdrop, Some(theme.colors.surface_subtle));
+                let expected = if active {
+                    theme.list.selected_foreground
+                } else {
+                    theme.list.inactive_selected_foreground
+                };
+                assert!(list.commands().iter().any(|command| matches!(command,
+                    DrawCommand::DrawText { command } if command.text == "Gmail"
+                        && command.bounds.origin.x < pane.origin.x && command.color == expected
+                )));
             }
         }
     }

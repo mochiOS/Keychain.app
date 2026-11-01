@@ -3,6 +3,14 @@
 Native AppCore/ViewKit management UI for the login-managed encrypted vault.
 Uses existing omochi controls, theme, scrolling and picker menus.
 
+The management UI uses an English `Toolbar` / `ActionToolbar` with native
+overflow, `NavigationSplitView` pane backgrounds and continuous corner clips,
+and `ListRow` selection states. Search results retain their original item
+indices when selected. `ContentArea::pane` supplies the detail inset; the
+retained search field and grant picker survive view reconstruction. Authentication,
+approval and recovery screens retain their existing flow with English labels
+and instructions. Revealed secret text still disables layout caching.
+
 - OS password authentication unlocks the vault automatically; screen lock/logout
   clears keys. Ordinary reveal/delete/grant/revoke needs no extra password.
 - Search item labels/services/accounts, inspect owner/signing ID, and add items.
@@ -23,3 +31,9 @@ the vault closed until OS password authentication; it does not create a weaker k
 The supplied revised icon is bundled as `appicon.png`; its original copy is kept
 at `docs/resources/appicons/Key Chain.app.png`. The first API is Rust AppCore;
 C/Kome bindings are not included.
+
+UI tests cover filtered selection, active/inactive selection colors, pane-corner
+backdrops and toolbar bounds, alongside the existing tests for reveal expiry,
+focus-loss cleanup, stale reveal rejection, storage failure and authentication
+requirements. Backend job execution, secret wiping and action dispatch are
+unchanged by the UI migration.
