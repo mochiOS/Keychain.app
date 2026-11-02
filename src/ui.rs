@@ -1,3 +1,4 @@
+use appcore::viewkit::components::Form as NativeForm;
 use appcore::viewkit::{
     event::{EventContext, EventResult, ViewEvent},
     platform::Key,
@@ -97,7 +98,7 @@ fn execute(job: Job, epoch: u64) -> Result<Snapshot, Error> {
 }
 struct Field {
     state: TextFieldInteractionState,
-    view: TextField,
+    view: Rc<TextField>,
 }
 impl Field {
     fn new(placeholder: &str, secure: bool, pending: Rc<Cell<Option<Action>>>) -> Self {
@@ -106,7 +107,10 @@ impl Field {
             .placeholder(placeholder)
             .secure(secure)
             .on_submit(move || pending.set(Some(Action::Submit)));
-        Self { state, view }
+        Self {
+            state,
+            view: Rc::new(view),
+        }
     }
     fn secret(&self) -> Secret {
         Secret::new(self.state.take_value().into_bytes())
@@ -154,6 +158,7 @@ struct Core {
 pub struct KeychainView {
     core: Rc<Core>,
 }
+#[cfg(test)]
 fn r(x: f32, y: f32, w: f32, h: f32) -> Rect {
     Rect::new(x, y, w.max(0.0), h.max(0.0))
 }
@@ -552,8 +557,7 @@ impl KeychainView {
             );
         } else if m.form != Form::Main {
             layout = layout.child(
-                Scroll::new(self.core.form_scroll.clone())
-                    .content(FormContents(self.core.clone()))
+                FormContents(self.core.clone())
                     .layout()
                     .flex_grow(1.0)
                     .flex_shrink(1.0),
@@ -603,18 +607,9 @@ impl KeychainView {
         }
         Box::new(Surface::app().content(layout))
     }
-    fn form_frames(&self, b: Rect) -> (Rect, Vec<(&Field, &'static str, Rect)>, Rect, Rect) {
+    fn form_fields(&self) -> Vec<(&Field, &'static str)> {
         let form = self.core.model.borrow().form;
-        let w = (b.size.width - 48.0).clamp(0.0, 440.0);
-        let x = b.origin.x + (b.size.width - w) / 2.0;
-        let y = b.origin.y + 64.0_f32.min((b.size.height * 0.15).max(8.0));
-        let mut fields = vec![];
-        let intro = if matches!(form, Form::Grant(_) | Form::Revoke(_)) {
-            240.0
-        } else {
-            160.0
-        };
-        let specs: Vec<(&Field, &str)> = match form {
+        match form {
             Form::New => vec![
                 (&self.core.label, "Label"),
                 (&self.core.service, "Service"),
@@ -642,22 +637,9 @@ impl KeychainView {
                 vec![]
             }
             _ => vec![(&self.core.password, "Vault password")],
-        };
-        for (i, (f, label)) in specs.into_iter().enumerate() {
-            fields.push((f, label, r(x, y + intro + i as f32 * 66.0, w, 30.0)));
         }
-        let bottom = fields
-            .last()
-            .map(|(_, _, r)| r.origin.y + 48.0)
-            .unwrap_or(y + intro + 16.0);
-        (
-            r(x, y, w, intro - 30.0),
-            fields,
-            r(x + w - 100.0, bottom, 100.0, 30.0),
-            r(x, bottom, 80.0, 30.0),
-        )
     }
-    fn paint_form(&self, b: Rect, c: &mut PaintContext<'_>) {
+    fn form_content(&self, theme: &Theme) -> ContentArea<NativeForm<VStack>> {
         let m = self.core.model.borrow();
         let (title, description, submit) = match m.form {
             Form::AwaitingLogin => (
@@ -705,7 +687,7 @@ impl KeychainView {
                 "The vault will be encrypted again with your new password.",
                 "Change",
             ),
-            Form::Main => return,
+            Form::Main => return ContentArea::pane(NativeForm::new(VStack::new())),
         };
         let target = match m.form {
             Form::Grant(n) => m.apps.get(n),
@@ -728,51 +710,58 @@ impl KeychainView {
         } else {
             description.to_owned()
         };
-        let (head, fields, submit_frame, cancel) = self.form_frames(b);
-        Text::styled(title, TextRole::TitleSmall)
-            .paint(r(head.origin.x, head.origin.y, head.size.width, 32.0), c);
-        Text::body(description)
-            .color(c.theme.colors.text_secondary)
-            .paint(
-                r(
-                    head.origin.x,
-                    head.origin.y + 42.0,
-                    head.size.width,
-                    head.size.height - 42.0,
-                ),
-                c,
+        let mut fields = VStack::new()
+            .alignment(StackAlignment::Stretch)
+            .gap(StackGap::Medium)
+            .child(Text::body(description).tone(TextTone::Secondary));
+        for (field, label) in self.form_fields() {
+            fields = fields.child(
+                VStack::new()
+                    .alignment(StackAlignment::Stretch)
+                    .gap(StackGap::ExtraSmall)
+                    .child(field.view.label(label))
+                    .child(field.view.clone()),
             );
-        for (f, label, frame) in fields {
-            Text::caption(label)
-                .color(c.theme.colors.text_secondary)
-                .paint(
-                    r(
-                        frame.origin.x,
-                        frame.origin.y - 22.0,
-                        frame.size.width,
-                        20.0,
-                    ),
-                    c,
-                );
-            f.view.paint(frame, c);
         }
         let busy = self.core.worker.borrow().is_some();
-        self.core
-            .button(if busy { "Working…" } else { submit }, Action::Submit)
-            .style(if m.form == Form::Delete {
-                ButtonStyle::Danger
-            } else {
-                ButtonStyle::Accent
-            })
-            .enabled(!busy)
-            .paint(submit_frame, c);
+        let mut actions = HStack::new()
+            .alignment(StackAlignment::Center)
+            .gap(StackGap::Small)
+            .child(Spacer::new());
         if !matches!(m.form, Form::Initialize | Form::Unlock) {
-            self.core
-                .button("Cancel", Action::Cancel)
-                .style(ButtonStyle::Ghost)
-                .enabled(!busy)
-                .paint(cancel, c);
+            actions = actions.child(
+                self.core
+                    .button("Cancel", Action::Cancel)
+                    .style(ButtonStyle::Ghost)
+                    .enabled(!busy),
+            );
         }
+        actions = actions.child(
+            self.core
+                .button(if busy { "Working…" } else { submit }, Action::Submit)
+                .style(if m.form == Form::Delete {
+                    ButtonStyle::Danger
+                } else {
+                    ButtonStyle::Accent
+                })
+                .enabled(!busy),
+        );
+        let layout = VStack::new()
+            .alignment(StackAlignment::Stretch)
+            .gap(StackGap::Large)
+            .child(
+                Text::styled(title, TextRole::TitleSmall)
+                    .layout()
+                    .flex_shrink(0.0),
+            )
+            .child(
+                Scroll::new(self.core.form_scroll.clone())
+                    .content(fields)
+                    .layout()
+                    .flex_grow(1.0),
+            )
+            .child(actions.layout().flex_shrink(0.0));
+        ContentArea::pane(NativeForm::new(layout)).maximum_width(theme.layout.dialog_width)
     }
 }
 impl View for KeychainView {
@@ -836,48 +825,34 @@ impl View for KeychainView {
 }
 struct FormContents(Rc<Core>);
 impl View for FormContents {
-    fn measure(&self, c: Constraints, _: &mut MeasureContext<'_>) -> Size {
-        let form = self.0.model.borrow().form;
-        let height = match form {
-            Form::New => 520.0,
-            Form::ChangePassword => 455.0,
-            Form::Grant(_) | Form::Revoke(_) => 450.0,
-            _ => 390.0,
-        };
-        c.constrain(Size::new(c.maximum.width, height))
-    }
-    fn paint(&self, b: Rect, c: &mut PaintContext<'_>) {
+    fn measure(&self, constraints: Constraints, context: &mut MeasureContext<'_>) -> Size {
         KeychainView {
             core: self.0.clone(),
         }
-        .paint_form(b, c)
+        .form_content(context.theme)
+        .measure(constraints, context)
     }
-    fn handle_event(&self, b: Rect, event: &ViewEvent, c: &mut EventContext<'_>) -> EventResult {
-        let view = KeychainView {
+    fn paint(&self, bounds: Rect, context: &mut PaintContext<'_>) {
+        KeychainView {
             core: self.0.clone(),
-        };
-        let form = self.0.model.borrow().form;
-        let mut result = EventResult::Ignored;
-        let (_, fields, submit, cancel) = view.form_frames(b);
-        for (f, _, frame) in fields {
-            result = result.merge(f.view.handle_event(frame, event, c));
         }
-        result = result.merge(
-            self.0
-                .button("Continue", Action::Submit)
-                .enabled(self.0.worker.borrow().is_none())
-                .handle_event(submit, event, c),
-        );
-        if !matches!(form, Form::Initialize | Form::Unlock) {
-            result = result.merge(
-                self.0
-                    .button("Cancel", Action::Cancel)
-                    .handle_event(cancel, event, c),
-            );
+        .form_content(context.theme)
+        .paint(bounds, context);
+    }
+    fn handle_event(
+        &self,
+        bounds: Rect,
+        event: &ViewEvent,
+        context: &mut EventContext<'_>,
+    ) -> EventResult {
+        KeychainView {
+            core: self.0.clone(),
         }
-        result
+        .form_content(context.theme())
+        .handle_event(bounds, event, context)
     }
 }
+
 struct Details(Rc<Core>);
 impl Details {
     fn content(&self) -> ContentArea<VStack> {
@@ -1108,7 +1083,9 @@ impl View for ItemList {
 mod tests {
     use super::*;
     use appcore::viewkit::{
-        draw_command::DisplayList, event::ContextMenuRequest, platform::PointerButton,
+        draw_command::{DisplayList, DrawCommand},
+        event::ContextMenuRequest,
+        platform::PointerButton,
         typography::TextMeasurer,
     };
     fn application(name: &str, n: u8) -> Application {
@@ -1171,6 +1148,180 @@ mod tests {
         v.handle_event(bounds(), &e, &mut c);
         c.take_context_menu_request()
     }
+    fn form_snapshot(
+        v: &KeychainView,
+        bounds: Rect,
+        theme: &Theme,
+    ) -> (DisplayList, Vec<AccessibilityNode>) {
+        let mut text = TextMeasurer::new();
+        let mut list = DisplayList::new();
+        let mut nodes = vec![];
+        v.content().paint(
+            bounds,
+            &mut PaintContext::new(&mut list, theme, &theme.typography, &mut text)
+                .with_accessibility_nodes(&mut nodes),
+        );
+        (list, nodes)
+    }
+
+    #[test]
+    fn standard_forms_keep_actions_reachable_at_small_sizes_in_both_themes() {
+        let v = fixture();
+        for theme in [Theme::LIGHT, Theme::DARK] {
+            for login_managed in [false, true] {
+                for (form, submit) in [
+                    (Form::AwaitingLogin, "Refresh"),
+                    (Form::Initialize, "Create"),
+                    (Form::Unlock, "Migrate"),
+                    (Form::New, "Save"),
+                    (Form::Reveal, "Reveal"),
+                    (Form::Delete, "Delete"),
+                    (Form::Grant(1), "Allow"),
+                    (Form::Revoke(0), "Revoke"),
+                    (Form::ChangePassword, "Change"),
+                ] {
+                    {
+                        let mut m = v.core.model.borrow_mut();
+                        m.form = form;
+                        m.error = Some(Error::Storage);
+                        m.status.as_mut().unwrap().login_managed = login_managed;
+                    }
+                    for (w, h) in [(320., 240.), (880., 620.)] {
+                        let b = r(0., 0., w, h);
+                        v.core.form_scroll.reset();
+                        let (_, nodes) = form_snapshot(&v, b, &theme);
+                        let buttons: Vec<_> = nodes
+                            .iter()
+                            .filter(|n| n.role == AccessibilityRole::Button)
+                            .collect();
+                        let submit_frame = buttons
+                            .iter()
+                            .find(|n| n.label.as_deref() == Some(submit))
+                            .unwrap()
+                            .bounds;
+                        assert_eq!(
+                            buttons.len(),
+                            if matches!(form, Form::Initialize | Form::Unlock) {
+                                1
+                            } else {
+                                2
+                            }
+                        );
+                        for button in &buttons {
+                            let frame = button.bounds;
+                            assert!(frame.size.width > 0. && frame.size.height > 0.);
+                            assert!(frame.origin.x >= 0. && frame.origin.y >= 0.);
+                            assert!(frame.origin.x + frame.size.width <= w + 0.1);
+                            assert!(frame.origin.y + frame.size.height <= h + 0.1);
+                        }
+                        for pair in buttons.windows(2) {
+                            assert!(
+                                pair[0].bounds.origin.x + pair[0].bounds.size.width
+                                    <= pair[1].bounds.origin.x
+                            );
+                        }
+                        for node in nodes
+                            .iter()
+                            .filter(|n| n.role == AccessibilityRole::TextField)
+                        {
+                            assert!(node.bounds.size.width > 0.);
+                            assert!(
+                                node.bounds.origin.x >= 0.
+                                    && node.bounds.origin.x + node.bounds.size.width <= w + 0.1
+                            );
+                        }
+                        v.core.form_scroll.set_offset(0., 10000.);
+                        let (_, after) = form_snapshot(&v, b, &theme);
+                        assert_eq!(
+                            after
+                                .iter()
+                                .find(|n| n.label.as_deref() == Some(submit))
+                                .unwrap()
+                                .bounds,
+                            submit_frame
+                        );
+                        assert!(v.core.pending.get().is_none());
+                        assert!(v.core.worker.borrow().is_none());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn native_form_scroll_preserves_secure_input_and_cancel_still_wipes_it() {
+        let v = fixture();
+        v.core.action(Action::New);
+        v.core.value.state.set_value("fixture-only-secret");
+        let b = r(0., 0., 320., 240.);
+        let theme = Theme::LIGHT;
+        let (list, nodes) = form_snapshot(&v, b, &theme);
+        let submit = nodes
+            .iter()
+            .find(|n| n.role == AccessibilityRole::Button && n.label.as_deref() == Some("Save"))
+            .unwrap()
+            .bounds;
+        let body = list
+            .commands()
+            .iter()
+            .find_map(|c| match c {
+                DrawCommand::PushClip { rect }
+                    if rect.size.height > 0.
+                        && rect.origin.y + rect.size.height <= submit.origin.y =>
+                {
+                    Some(*rect)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut text = TextMeasurer::new();
+        let mut context = EventContext::new(&theme, &theme.typography, &mut text);
+        v.handle_event(
+            b,
+            &ViewEvent::Scroll {
+                position: Point::new(body.origin.x + 8., body.origin.y + 8.),
+                delta_x: 0.,
+                delta_y: 1000.,
+            },
+            &mut context,
+        );
+        assert!(v.core.form_scroll.offset_y() > 0.);
+        let (list, nodes) = form_snapshot(&v, b, &theme);
+        let secret = nodes
+            .iter()
+            .find(|n| {
+                n.role == AccessibilityRole::TextField && n.label.as_deref() == Some("Secret")
+            })
+            .unwrap();
+        assert!(secret.value.is_none());
+        assert_eq!(v.core.value.state.value(), "fixture-only-secret");
+        assert!(!list.commands().iter().any(|c|matches!(c,DrawCommand::DrawText{command} if command.text.contains("fixture-only-secret"))));
+        let cancel = nodes
+            .iter()
+            .find(|n| n.role == AccessibilityRole::Button && n.label.as_deref() == Some("Cancel"))
+            .unwrap()
+            .bounds;
+        let position = Point::new(
+            cancel.origin.x + cancel.size.width / 2.,
+            cancel.origin.y + cancel.size.height / 2.,
+        );
+        for e in [
+            ViewEvent::PointerPressed {
+                position,
+                button: PointerButton::Primary,
+            },
+            ViewEvent::PointerReleased {
+                position,
+                button: PointerButton::Primary,
+            },
+        ] {
+            v.handle_event(b, &e, &mut context);
+        }
+        assert!(v.core.value.state.value().is_empty());
+        assert!(v.core.model.borrow().form == Form::Main);
+        assert!(v.core.worker.borrow().is_none());
+    }
+
     #[test]
     fn native_grant_picker_survives_paints_and_requires_reauthentication() {
         let v = fixture();
@@ -1275,9 +1426,7 @@ mod tests {
             m.status = Some(s);
             m.form = Form::Grant(1);
         }
-        assert!(v.form_frames(bounds()).1.is_empty());
-        let (head, _, submit, _) = v.form_frames(bounds());
-        assert!(submit.origin.y >= head.origin.y + head.size.height);
+        assert!(v.form_fields().is_empty());
         let nodes = paint(&v);
         assert!(
             !nodes
@@ -1296,9 +1445,9 @@ mod tests {
             assert!(!matches!(action, Action::Lock | Action::ChangePassword));
         }
         v.core.model.borrow_mut().form = Form::AwaitingLogin;
-        assert!(v.form_frames(bounds()).1.is_empty());
+        assert!(v.form_fields().is_empty());
         v.core.model.borrow_mut().form = Form::Unlock;
-        assert_eq!(v.form_frames(bounds()).1.len(), 1);
+        assert_eq!(v.form_fields().len(), 1);
     }
     #[test]
     fn toolbar_controls_do_not_overlap_at_supported_widths() {
