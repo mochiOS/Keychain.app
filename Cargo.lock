@@ -1123,6 +1123,7 @@ dependencies = [
  "mochios-filesystem-protocol",
  "mochios-net-device-protocol",
  "mochios-posix-protocol",
+ "sha2",
 ]
 
 [[package]]
