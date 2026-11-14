@@ -1,0 +1,27 @@
+{
+  "format": 1,
+  "steps": [
+    "$(MOCHIOS_CARGO) --manifest-path $(PROJECT)/Cargo.toml --bin keychain",
+    "python3 $(ROOT)/tools/devkit/build-support/package-app.py --source $(PROJECT) --binary $(RUST_TARGET_DIR)/x86_64-unknown-mochios/release/keychain --mpack $(MPACK)"
+  ],
+  "package": {
+    "name": "app-keychain",
+    "version": "0.1.0",
+    "target": "x86_64-mochios",
+    "abi": "mochios-1"
+  },
+  "artifact": "out/mdp/app-keychain.tar.mdp",
+  "exports": [
+    {
+      "source": "out/mdp/application/application.mpkg",
+      "area": "applications",
+      "destination": "keychain.mpkg"
+    }
+  ],
+  "metadata": {
+    "application": {
+      "source": "keychain",
+      "mpkg": "keychain.mpkg"
+    }
+  }
+}
