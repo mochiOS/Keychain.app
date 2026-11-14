@@ -7,7 +7,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-appcore = { package = "mochios-appcore", path = "../../tools/devkit/crates/appcore" }
+appcore = { package = "mochios-appcore", git = "https://github.com/mochiOS/devkit" }
 
 [[bin]]
 name = "keychain"
